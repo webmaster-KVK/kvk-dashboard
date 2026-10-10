@@ -334,8 +334,6 @@ function switchWebshopTab(index) {
   document.querySelectorAll('.ws-tab').forEach((btn, i) => {
     btn.classList.toggle('active', i === index);
   });
-  const searchBox = document.getElementById('orderSearch');
-  if (searchBox) searchBox.value = '';
   const { orders, webshop } = _allWebshopData[index];
   renderDashboard(orders, webshop);
 }
@@ -666,93 +664,173 @@ function renderPaymentBreakdown(orders, getStatus) {
   }).join('');
 }
 
-// Cached so filterOrders() (wired to the search box's oninput) can re-run
-// the same render without the caller needing to re-fetch or re-pass
-// anything.
-let _lastOrdersRender = null;
-
-function filterOrders(term) {
-  if (!_lastOrdersRender) return;
-  const { orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod } = _lastOrdersRender;
-  renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod, term);
+// ─── SORTABLE / FILTERABLE TABLES ──────────────────────────
+// Shared by the orders table and the productions table: click a column
+// header to sort by it (click again to reverse); the row of inputs
+// underneath filters that one column. One small engine instead of
+// building this twice.
+//
+// A column is { key, label, get: row => rawValue, format?: (rawValue, row) => displayString }.
+// Sorting always uses the raw value (so "€ 90" sorts correctly against
+// "€ 1.200" as numbers, not as strings); filtering matches against the
+// displayed text, since that's what a person types.
+function colText(col, row) {
+  const v = col.get(row);
+  if (v == null) return '';
+  return col.format ? String(col.format(v, row)) : String(v);
 }
 
-function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod, searchTerm = '') {
-  _lastOrdersRender = { orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod };
-  const tbody = document.getElementById('orderTable');
-
-  const term = searchTerm.trim().toLowerCase();
-  const matches = (o) => {
+function applySortAndFilter(rows, columns, state) {
+  let result = rows.filter(row => columns.every(col => {
+    const term = (state.filters[col.key] || '').trim().toLowerCase();
     if (!term) return true;
-    const customer = getCustomer(o);
-    const name = customer ? `${customer.firstName} ${customer.lastName}` : '';
-    const showName = getItems(o)[0]?.product?.name || '';
-    const orderNr = getOrderNr(o) || '';
-    return name.toLowerCase().includes(term) || showName.toLowerCase().includes(term) || orderNr.includes(term);
-  };
-  const filtered = orders.filter(matches);
-  document.getElementById('orderCount').textContent = term
-    ? `${filtered.length} van ${orders.length} bestellingen`
-    : `${orders.length} bestellingen`;
-
-  if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">${term ? 'Geen bestellingen gevonden voor "' + escHtml(searchTerm) + '"' : 'Geen bestellingen gevonden'}</div></td></tr>`;
-    const existingBtn = document.getElementById('showMoreBtn');
-    if (existingBtn) existingBtn.remove();
-    return;
+    return colText(col, row).toLowerCase().includes(term);
+  }));
+  if (state.sortKey) {
+    const col = columns.find(c => c.key === state.sortKey);
+    const dir = state.sortDir;
+    result = [...result].sort((a, b) => {
+      const va = col.get(a), vb = col.get(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
   }
+  return result;
+}
 
-  const sorted = [...filtered].sort((a, b) => getCreatedAt(b) - getCreatedAt(a));
+// Builds the header ONCE (two rows: clickable labels, then filter inputs)
+// and wires up events — rebuilding it on every keystroke would blow away
+// focus mid-type, so filtering/sorting afterwards only ever touches the
+// body via onChange(), never this function again.
+function renderTableHead(theadEl, columns, state, onChange) {
+  const labelCells = columns.map(col =>
+    `<th class="sortable-th" data-key="${col.key}"><span>${escHtml(col.label)}</span><span class="sort-arrow"></span></th>`
+  ).join('');
+  const filterCells = columns.map(col =>
+    `<th class="filter-th"><input type="text" data-key="${col.key}" placeholder="Filter..." value="${escHtml(state.filters[col.key] || '')}"></th>`
+  ).join('');
+  theadEl.innerHTML = `<tr>${labelCells}</tr><tr>${filterCells}</tr>`;
+
+  theadEl.querySelectorAll('.sortable-th').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.key;
+      if (state.sortKey === key) state.sortDir *= -1;
+      else { state.sortKey = key; state.sortDir = 1; }
+      updateSortArrows(theadEl, state);
+      onChange();
+    });
+  });
+  theadEl.querySelectorAll('.filter-th input').forEach(input => {
+    input.addEventListener('input', () => {
+      state.filters[input.dataset.key] = input.value;
+      onChange();
+    });
+  });
+  updateSortArrows(theadEl, state);
+}
+
+function updateSortArrows(theadEl, state) {
+  theadEl.querySelectorAll('.sortable-th').forEach(th => {
+    const arrow = th.querySelector('.sort-arrow');
+    arrow.textContent = th.dataset.key === state.sortKey ? (state.sortDir === 1 ? ' ▲' : ' ▼') : '';
+  });
+}
+
+const _orderTableState = { sortKey: 'createdAt', sortDir: -1, filters: {} };
+
+function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod) {
   const pillClass = { Succeeded: 'pill-succeeded', Created: 'pill-created', Failed: 'pill-failed', Pending: 'pill-pending', Prepared: 'pill-succeeded' };
   const pillLabel = { Succeeded: 'Betaald', Created: 'Openstaand', Failed: 'Mislukt', Pending: 'Bezig', Prepared: 'Gratis' };
 
-  const PAGE_SIZE = 10;
-  let showing = Math.min(PAGE_SIZE, sorted.length);
-
-  function renderRows() {
-    tbody.innerHTML = sorted.slice(0, showing).map(o => {
+  const rows = orders.map(o => {
     const customer = getCustomer(o);
     const items = getItems(o);
-    const showName = items[0]?.product?.name || '—';
-    const ticketCount = items.reduce((s, i) => s + (i.amount || 0), 0);
-    const orderNr = getOrderNr(o) ? `#${getOrderNr(o)}` : '—';
     const status = getStatus(o);
-    const price = getPrice(o);
-    const method = getMethod(o);
+    const orderNr = getOrderNr(o);
+    return {
+      orderNr: orderNr ? Number(orderNr) || orderNr : null,
+      orderNrLabel: orderNr ? `#${orderNr}` : '—',
+      customer: customer ? `${customer.firstName} ${customer.lastName}` : '—',
+      show: items[0]?.product?.name || '—',
+      tickets: items.reduce((s, i) => s + (i.amount || 0), 0),
+      price: getPrice(o),
+      method: getMethod(o),
+      statusLabel: pillLabel[status] || status,
+      pillClass: pillClass[status] || 'pill-pending',
+      createdAt: getCreatedAt(o),
+    };
+  });
 
-    return `<tr>
-      <td>${orderNr}</td>
-      <td>${customer ? `${customer.firstName} ${customer.lastName}` : '—'}</td>
-      <td style="color:var(--muted);font-style:italic">${showName}</td>
-      <td>${ticketCount || '—'}</td>
-      <td>${fmt(price)}</td>
-      <td style="color:var(--muted)">${method}</td>
-      <td><span class="status-pill ${pillClass[status] || 'pill-pending'}">${pillLabel[status] || status}</span></td>
-      <td style="color:var(--muted)">${fmtDate(getCreatedAt(o))}</td>
-    </tr>`;
-    }).join('');
+  const columns = [
+    { key: 'orderNr', label: 'Bestelnr.', get: r => r.orderNr, format: (v, r) => r.orderNrLabel },
+    { key: 'customer', label: 'Klant', get: r => r.customer },
+    { key: 'show', label: 'Voorstelling', get: r => r.show },
+    { key: 'tickets', label: 'Tickets', get: r => r.tickets },
+    { key: 'price', label: 'Bedrag', get: r => r.price, format: v => fmt(v) },
+    { key: 'method', label: 'Betaalmethode', get: r => r.method },
+    { key: 'statusLabel', label: 'Status', get: r => r.statusLabel },
+    { key: 'createdAt', label: 'Datum', get: r => r.createdAt, format: v => fmtDate(v) },
+  ];
 
-    // Show more button
+  const tbody = document.getElementById('orderTable');
+  const theadEl = document.getElementById('orderTableHead');
+  const PAGE_SIZE = 10;
+  let showing = PAGE_SIZE;
+  let filtered = rows;
+
+  function renderBody() {
+    tbody.innerHTML = filtered.slice(0, showing).map(r => `<tr>
+      <td>${r.orderNrLabel}</td>
+      <td>${escHtml(r.customer)}</td>
+      <td style="color:var(--muted);font-style:italic">${escHtml(r.show)}</td>
+      <td>${r.tickets || '—'}</td>
+      <td>${fmt(r.price)}</td>
+      <td style="color:var(--muted)">${escHtml(r.method)}</td>
+      <td><span class="status-pill ${r.pillClass}">${escHtml(r.statusLabel)}</span></td>
+      <td style="color:var(--muted)">${fmtDate(r.createdAt)}</td>
+    </tr>`).join('');
+
     const existingBtn = document.getElementById('showMoreBtn');
     if (existingBtn) existingBtn.remove();
-
-    if (showing < sorted.length) {
+    if (showing < filtered.length) {
       const btn = document.createElement('div');
       btn.id = 'showMoreBtn';
       btn.style.cssText = 'text-align:center;padding:1.25rem;border-top:1px solid var(--border)';
       btn.innerHTML = `<button class="btn" onclick="showMore()" style="padding:0.5rem 2rem">
-        ↓ Meer tonen (${sorted.length - showing} verborgen)
+        ↓ Meer tonen (${filtered.length - showing} verborgen)
       </button>`;
       tbody.closest('table').after(btn);
     }
   }
 
+  function recompute() {
+    filtered = applySortAndFilter(rows, columns, _orderTableState);
+    showing = PAGE_SIZE;
+    const active = Object.values(_orderTableState.filters).some(f => f && f.trim());
+    document.getElementById('orderCount').textContent = active
+      ? `${filtered.length} van ${rows.length} bestellingen`
+      : `${rows.length} bestellingen`;
+
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="8"><div class="empty-state">Geen bestellingen gevonden</div></td></tr>';
+      const existingBtn = document.getElementById('showMoreBtn');
+      if (existingBtn) existingBtn.remove();
+      return;
+    }
+    renderBody();
+  }
+
   window.showMore = function() {
-    showing = Math.min(showing + PAGE_SIZE, sorted.length);
-    renderRows();
+    showing = Math.min(showing + PAGE_SIZE, filtered.length);
+    renderBody();
   };
 
-  renderRows();
+  renderTableHead(theadEl, columns, _orderTableState, recompute);
+  recompute();
 }
 
 function renderWeekChart(orders, getCreatedAt, getItems, getStatus) {
@@ -1412,34 +1490,44 @@ async function loadStats() {
   }
 }
 
-function filterStats(term) {
-  renderStatsTable(_statsRows, term);
-}
+const STATS_COLUMNS = [
+  { key: 'name', label: 'Productie', get: r => r.name },
+  { key: 'date', label: 'Datum', get: r => r.date, format: v => v ? fmtDate(v) : '—' },
+  { key: 'tickets', label: 'Toeschouwers', get: r => r.tickets },
+  { key: 'revenue', label: 'Omzet', get: r => r.revenue, format: v => fmt(v) },
+  { key: 'avgOrder', label: 'Gem. bestelwaarde', get: r => r.avgOrder, format: v => fmt(v) },
+];
+const _statsTableState = { sortKey: 'date', sortDir: 1, filters: {} };
 
-function renderStatsTable(rows, searchTerm = '') {
+function renderStatsTable(rows) {
   const tbody = document.getElementById('statsTable');
-  if (!tbody) return;
-  const term = searchTerm.trim().toLowerCase();
-  const filtered = term ? rows.filter(r => r.name.toLowerCase().includes(term)) : rows;
+  const theadEl = document.getElementById('statsTableHead');
+  if (!tbody || !theadEl) return;
 
-  document.getElementById('statsCount').textContent = term
-    ? `${filtered.length} van ${rows.length} producties`
-    : `${rows.length} producties`;
+  function recompute() {
+    const filtered = applySortAndFilter(rows, STATS_COLUMNS, _statsTableState);
+    const active = Object.values(_statsTableState.filters).some(f => f && f.trim());
+    document.getElementById('statsCount').textContent = active
+      ? `${filtered.length} van ${rows.length} producties`
+      : `${rows.length} producties`;
 
-  if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state">${term ? 'Geen producties gevonden voor "' + escHtml(searchTerm) + '"' : 'Geen producties gevonden'}</div></td></tr>`;
-    return;
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Geen producties gevonden</div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = filtered.map(r => `
+      <tr>
+        <td>${escHtml(r.name)}</td>
+        <td style="color:var(--muted)">${r.date ? fmtDate(r.date) : '—'}</td>
+        <td>${r.tickets}</td>
+        <td>${fmt(r.revenue)}</td>
+        <td>${fmt(r.avgOrder)}</td>
+      </tr>
+    `).join('');
   }
 
-  tbody.innerHTML = filtered.map(r => `
-    <tr>
-      <td>${escHtml(r.name)}</td>
-      <td style="color:var(--muted)">${r.date ? fmtDate(r.date) : '—'}</td>
-      <td>${r.tickets}</td>
-      <td>${fmt(r.revenue)}</td>
-      <td>${fmt(r.avgOrder)}</td>
-    </tr>
-  `).join('');
+  renderTableHead(theadEl, STATS_COLUMNS, _statsTableState, recompute);
+  recompute();
 }
 
 function renderStatsCharts(rows) {

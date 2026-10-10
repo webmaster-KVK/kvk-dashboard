@@ -363,6 +363,32 @@
     font-weight: 400;
   }
 
+  /* Sortable / filterable table headers — see makeTableController() */
+  thead th.sortable-th {
+    border-bottom: none;
+    padding-bottom: 0.4rem;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  thead th.sortable-th:hover { color: var(--text); }
+  thead th.sortable-th .sort-arrow { color: var(--gold); margin-left: 0.2em; }
+  thead th.filter-th { border-bottom: 1px solid var(--border); padding: 0 0.3rem 0.6rem 0; }
+  thead th.filter-th input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    background: var(--surface2, var(--surface));
+    color: var(--text);
+    border-radius: 3px;
+    font-size: 0.68rem;
+    font-family: inherit;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  thead th.filter-th input::placeholder { color: var(--muted); }
+
   tbody tr {
     border-bottom: 1px solid var(--border);
     transition: background 0.15s;

@@ -108,19 +108,10 @@
 <div class="table-wrap">
   <div class="card-header" style="margin-bottom:1rem">
     <div class="card-title">Alle gespeelde producties</div>
-    <input type="search" id="statsSearch" class="list-search" placeholder="Zoek op titel..." style="max-width:16rem" oninput="filterStats(this.value)">
     <div class="card-meta" id="statsCount">—</div>
   </div>
   <table>
-    <thead>
-      <tr>
-        <th>Productie</th>
-        <th>Datum</th>
-        <th>Toeschouwers</th>
-        <th>Omzet</th>
-        <th>Gem. bestelwaarde</th>
-      </tr>
-    </thead>
+    <thead id="statsTableHead"></thead>
     <tbody id="statsTable">
       <tr><td colspan="5"><div class="empty-state">Laden...</div></td></tr>
     </tbody>

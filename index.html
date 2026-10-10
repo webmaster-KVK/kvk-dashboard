@@ -127,22 +127,10 @@
 <div class="table-wrap">
   <div class="card-header" style="margin-bottom:1rem">
     <div class="card-title">Recente bestellingen</div>
-    <input type="search" id="orderSearch" class="list-search" placeholder="Zoek op naam, bestelnr. of voorstelling..." style="max-width:16rem" oninput="filterOrders(this.value)">
     <div class="card-meta" id="orderCount">—</div>
   </div>
   <table>
-    <thead>
-      <tr>
-        <th>Bestelnr.</th>
-        <th>Klant</th>
-        <th>Voorstelling</th>
-        <th>Tickets</th>
-        <th>Bedrag</th>
-        <th>Betaalmethode</th>
-        <th>Status</th>
-        <th>Datum</th>
-      </tr>
-    </thead>
+    <thead id="orderTableHead"></thead>
     <tbody id="orderTable">
       <tr><td colspan="8"><div class="empty-state">Laden...</div></td></tr>
     </tbody>
