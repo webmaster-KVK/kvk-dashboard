@@ -354,6 +354,21 @@ function toggleArchive() {
   loadData();
 }
 
+// The date a webshop's tab should sort on: for current productions, the
+// soonest show date that hasn't happened yet (so the next performance is
+// leftmost); for the archive, the most recent show date (so the show that
+// just finished is leftmost instead of the oldest one in KVK's history).
+function sortDate(webshop, archived) {
+  const starts = (webshop?.products || [])
+    .flatMap(p => (p.dateRange ? [p.dateRange.startDate] : []))
+    .filter(d => typeof d === 'number');
+  if (starts.length === 0) return archived ? -Infinity : Infinity;
+  if (archived) return Math.max(...starts);
+  const now = Date.now();
+  const upcoming = starts.filter(d => d >= now);
+  return upcoming.length ? Math.min(...upcoming) : Math.min(...starts);
+}
+
 async function loadData() {
   setStatus('⏳ Voorstellingen zoeken...', 'loading');
   try {
@@ -371,6 +386,15 @@ async function loadData() {
       const [orders, webshop] = await Promise.all([fetchAllOrders(ws.id), fetchWebshop(ws.id)]);
       return { orders, webshop };
     });
+
+    // Sort tabs by show date (see sortDate above) — ascending for current
+    // productions (soonest upcoming first), descending for the archive.
+    results.sort((a, b) => {
+      const da = sortDate(a.webshop, _showArchived);
+      const db = sortDate(b.webshop, _showArchived);
+      return _showArchived ? db - da : da - db;
+    });
+    CONFIG.webshops = results.map(r => ({ id: r.webshop.id, name: r.webshop.meta?.name || 'Webshop' }));
 
     _allWebshopData = results;
     if (_activeTabIndex >= results.length) _activeTabIndex = 0;
