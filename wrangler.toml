@@ -1,0 +1,7 @@
+name = "kvk-dashboard"
+main = "stamhoofd-proxy-worker.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "KVK_STORE"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
