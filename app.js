@@ -9,7 +9,7 @@ const DEFAULTS = {
   hiddenWebshopIds: [],
 
   capacity: 240,
-  proxyUrl: 'https://kvk-dashboard.REPLACE_WITH_YOUR_SUBDOMAIN.workers.dev',
+  proxyUrl: 'https://kvk-dashboard.j-verley.workers.dev',
 };
 
 // Merge saved settings from localStorage over defaults.
