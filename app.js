@@ -73,11 +73,17 @@ async function fetchAllWebshops() {
 
 // Live-discovers the webshops to show as tabs: every webshop Stamhoofd
 // knows about, minus whichever ones the admin has hidden.
-async function discoverWebshops() {
+// archived=false (default): only "Open" webshops — this is what loads on
+// every visit. archived=true: only "Archived" ones — only ever fetched
+// when the admin explicitly asks for the archive (see toggleArchive), so
+// years of old productions never slow down the normal dashboard.
+async function discoverWebshops(archived = false) {
   const all = await fetchAllWebshops();
   const hidden = new Set(CONFIG.hiddenWebshopIds || []);
+  const wantStatus = archived ? 'Archived' : 'Open';
   return all
     .filter(ws => !hidden.has(ws.id))
+    .filter(ws => (ws.meta?.status || 'Open') === wantStatus)
     .map(ws => ({ id: ws.id, name: ws.meta?.name || ws.name || 'Webshop' }));
 }
 
@@ -335,12 +341,27 @@ function renderWebshopTabs() {
   }).join('');
 }
 
+// Whether the "Archief" view is active — toggled by toggleArchive(), see
+// below. Kept separate from CONFIG since it's a per-visit view choice, not
+// a setting.
+let _showArchived = false;
+
+function toggleArchive() {
+  _showArchived = !_showArchived;
+  const btn = document.getElementById('archiveToggle');
+  if (btn) btn.textContent = _showArchived ? '↩ Actuele producties' : '📁 Archief';
+  _activeTabIndex = 0;
+  loadData();
+}
+
 async function loadData() {
   setStatus('⏳ Voorstellingen zoeken...', 'loading');
   try {
-    const webshops = await discoverWebshops();
+    const webshops = await discoverWebshops(_showArchived);
     CONFIG.webshops = webshops; // keeps renderWebshopTabs()'s name lookup working
-    if (webshops.length === 0) throw new Error('Geen webshops gevonden');
+    if (webshops.length === 0) {
+      throw new Error(_showArchived ? 'Geen gearchiveerde producties gevonden' : 'Geen actuele producties gevonden');
+    }
 
     setStatus('⏳ Data ophalen van Stamhoofd...', 'loading');
     // At most 3 webshops at once — matches what the original hand-picked
@@ -358,7 +379,8 @@ async function loadData() {
     switchWebshopTab(_activeTabIndex);
 
     const totalOrders = results.reduce((s, r) => s + r.orders.length, 0);
-    setStatus('✓ Laatste update: ' + new Date().toLocaleTimeString('nl-BE') + ' — ' + totalOrders + ' bestellingen geladen', 'success');
+    const modeLabel = _showArchived ? ' (archief)' : '';
+    setStatus('✓ Laatste update: ' + new Date().toLocaleTimeString('nl-BE') + modeLabel + ' — ' + totalOrders + ' bestellingen geladen', 'success');
   } catch (err) {
     console.error('loadData error:', err);
     setStatus('✗ Fout: ' + err.message, 'error');
