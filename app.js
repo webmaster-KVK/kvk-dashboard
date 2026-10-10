@@ -381,6 +381,7 @@ function sortDate(webshop, archived) {
 
 async function loadData() {
   setStatus('⏳ Voorstellingen zoeken...', 'loading');
+  renderEmptyTableHead('orderTableHead', ORDER_COLUMNS, _orderTableState);
   try {
     const webshops = await discoverWebshops(_showArchived);
     CONFIG.webshops = webshops; // keeps renderWebshopTabs()'s name lookup working
@@ -429,6 +430,7 @@ async function loadData() {
     if (sl) sl.innerHTML = '<div class="empty-state">Kon geen data laden.</div>';
     const ot = document.getElementById('orderTable');
     if (ot) ot.innerHTML = '<tr><td colspan="8"><div class="empty-state">Geen data beschikbaar</div></td></tr>';
+    renderEmptyTableHead('orderTableHead', ORDER_COLUMNS, _orderTableState);
   }
 }
 
@@ -742,6 +744,26 @@ function updateSortArrows(theadEl, state) {
 
 const _orderTableState = { sortKey: 'createdAt', sortDir: -1, filters: {} };
 
+const ORDER_COLUMNS = [
+  { key: 'orderNr', label: 'Bestelnr.', get: r => r.orderNr, format: (v, r) => r.orderNrLabel },
+  { key: 'customer', label: 'Klant', get: r => r.customer },
+  { key: 'show', label: 'Voorstelling', get: r => r.show },
+  { key: 'tickets', label: 'Tickets', get: r => r.tickets },
+  { key: 'price', label: 'Bedrag', get: r => r.price, format: v => fmt(v) },
+  { key: 'method', label: 'Betaalmethode', get: r => r.method },
+  { key: 'statusLabel', label: 'Status', get: r => r.statusLabel },
+  { key: 'createdAt', label: 'Datum', get: r => r.createdAt, format: v => fmtDate(v) },
+];
+
+// Headers render independently from whether data actually loaded — a
+// failed fetch (e.g. Stamhoofd's rate limit) used to leave the table
+// completely headerless, since the header used to only ever get built as
+// part of a successful render. Called from loadData()'s catch too.
+function renderEmptyTableHead(theadId, columns, state) {
+  const theadEl = document.getElementById(theadId);
+  if (theadEl) renderTableHead(theadEl, columns, state, () => {});
+}
+
 function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod) {
   const pillClass = { Succeeded: 'pill-succeeded', Created: 'pill-created', Failed: 'pill-failed', Pending: 'pill-pending', Prepared: 'pill-succeeded' };
   const pillLabel = { Succeeded: 'Betaald', Created: 'Openstaand', Failed: 'Mislukt', Pending: 'Bezig', Prepared: 'Gratis' };
@@ -765,16 +787,7 @@ function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOr
     };
   });
 
-  const columns = [
-    { key: 'orderNr', label: 'Bestelnr.', get: r => r.orderNr, format: (v, r) => r.orderNrLabel },
-    { key: 'customer', label: 'Klant', get: r => r.customer },
-    { key: 'show', label: 'Voorstelling', get: r => r.show },
-    { key: 'tickets', label: 'Tickets', get: r => r.tickets },
-    { key: 'price', label: 'Bedrag', get: r => r.price, format: v => fmt(v) },
-    { key: 'method', label: 'Betaalmethode', get: r => r.method },
-    { key: 'statusLabel', label: 'Status', get: r => r.statusLabel },
-    { key: 'createdAt', label: 'Datum', get: r => r.createdAt, format: v => fmtDate(v) },
-  ];
+  const columns = ORDER_COLUMNS;
 
   const tbody = document.getElementById('orderTable');
   const theadEl = document.getElementById('orderTableHead');
@@ -1460,6 +1473,7 @@ let _statsRows = [];
 
 async function loadStats() {
   setStatus('⏳ Producties zoeken...', 'loading');
+  renderEmptyTableHead('statsTableHead', STATS_COLUMNS, _statsTableState);
   try {
     const all = await fetchAllWebshops();
     const hidden = new Set(CONFIG.hiddenWebshopIds || []);
@@ -1487,6 +1501,7 @@ async function loadStats() {
     setStatus('✗ Fout: ' + err.message, 'error');
     const tbody = document.getElementById('statsTable');
     if (tbody) tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Kon geen data laden.</div></td></tr>';
+    renderEmptyTableHead('statsTableHead', STATS_COLUMNS, _statsTableState);
   }
 }
 
