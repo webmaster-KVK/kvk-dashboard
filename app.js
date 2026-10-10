@@ -56,7 +56,7 @@ async function fetchAllWebshops() {
     const inner = new URL(`${apiBase()}/webshops`);
     for (const [k, v] of Object.entries(params)) inner.searchParams.set(k, v);
     const res = await fetchWithTimeout(proxied(inner.toString()), { headers: headers() }, 15000);
-    if (!res.ok) throw new Error(`Webshops API ${res.status}: ${res.statusText}`);
+    if (!res.ok) await throwApiError(res, `Webshops API ${res.status}`);
     const page = await res.json();
     const items = page.results || [];
     for (const item of items) {
@@ -219,6 +219,21 @@ function reloadCurrentPage() {
 }
 
 // Fetch ALL orders — deduplicated by order ID
+// Stamhoofd's own error messages (e.g. exactly how long a rate limit lasts)
+// only ever appear in the JSON body, never as a header a browser surfaces
+// on its own — without this, a sustained rate limit and an expired token
+// both just show up as a bare "429" or "401" with no way to tell them
+// apart or know how long to wait.
+async function throwApiError(res, label) {
+  let detail = res.statusText || String(res.status);
+  try {
+    const body = await res.json();
+    const err = body?.errors?.[0];
+    if (err) detail = err.human || err.message || detail;
+  } catch (e) { /* not JSON — keep statusText */ }
+  throw new Error(`${label}: ${detail}`);
+}
+
 async function fetchWithTimeout(url, options, ms, retries = 3) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -283,7 +298,7 @@ async function fetchAllOrders(webshopId) {
     inner.searchParams.set('limit',  '100');
     const fetchUrl = proxied(inner.toString());
     const res = await fetchWithTimeout(fetchUrl, { headers: headers() }, 15000);
-    if (!res.ok) throw new Error(`Orders API ${res.status}: ${res.statusText}`);
+    if (!res.ok) await throwApiError(res, `Orders API ${res.status}`);
     const page = await res.json();
    const items = Array.isArray(page) ? page : (page.results || page.orders || []);
     if (!items.length) break;
@@ -321,7 +336,7 @@ async function fetchAllOrders(webshopId) {
 
 async function fetchWebshop(webshopId) {
   const res = await fetchWithTimeout(proxied(`${apiBase()}/webshop/${webshopId}`), { headers: headers() }, 15000);
-  if (!res.ok) throw new Error(`Webshop API ${res.status}: ${res.statusText}`);
+  if (!res.ok) await throwApiError(res, `Webshop API ${res.status}`);
   return res.json();
 }
 
@@ -1681,8 +1696,19 @@ document.addEventListener('DOMContentLoaded', async function() {
   // Check for existing session; if none, login overlay stays visible
   await checkSession();
 
-  // Auto-refresh every 5 minutes
-  setInterval(function() { if (getSession()) { reloadCurrentPage(); fetchStamhoofdStatus(); } }, 5 * 60 * 1000);
+  // Auto-refresh every 15 minutes — only the live "actueel" dashboard, and
+  // only while it's actually showing current (not archived) productions.
+  // Both the archive view and the statistics page fetch every production's
+  // full order history at once, which is heavy enough that re-running it
+  // unattended on a timer risks the kind of rate-limit hit seen earlier —
+  // those two only ever reload when someone explicitly asks (↻ Vernieuwen,
+  // opening ↩ Archief, etc.).
+  setInterval(function() {
+    if (getSession() && !isStatsPage() && !_showArchived) {
+      loadData();
+      fetchStamhoofdStatus();
+    }
+  }, 15 * 60 * 1000);
 
  // Fetch latest GitHub commit date
 try {
