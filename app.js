@@ -203,10 +203,20 @@ async function saveConfig() {
   }
 
   toggleConfig();
-  loadData();
+  reloadCurrentPage();
 }
 
 // ─── DATA LOADING ─────────────────────────────────────────
+
+// app.js is shared between index.html (live per-production dashboard) and
+// statistieken.html (cross-production report) — this is how shared code
+// (login, settings-save, auto-refresh) knows which one to reload.
+function isStatsPage() {
+  return !!document.getElementById('statsTable');
+}
+function reloadCurrentPage() {
+  if (isStatsPage()) loadStats(); else loadData();
+}
 
 // Fetch ALL orders — deduplicated by order ID
 async function fetchWithTimeout(url, options, ms, retries = 3) {
@@ -324,6 +334,8 @@ function switchWebshopTab(index) {
   document.querySelectorAll('.ws-tab').forEach((btn, i) => {
     btn.classList.toggle('active', i === index);
   });
+  const searchBox = document.getElementById('orderSearch');
+  if (searchBox) searchBox.value = '';
   const { orders, webshop } = _allWebshopData[index];
   renderDashboard(orders, webshop);
 }
@@ -654,16 +666,43 @@ function renderPaymentBreakdown(orders, getStatus) {
   }).join('');
 }
 
-function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod) {
-  const tbody = document.getElementById('orderTable');
-  document.getElementById('orderCount').textContent = `${orders.length} bestellingen`;
+// Cached so filterOrders() (wired to the search box's oninput) can re-run
+// the same render without the caller needing to re-fetch or re-pass
+// anything.
+let _lastOrdersRender = null;
 
-  if (!orders.length) {
-    tbody.innerHTML = '<tr><td colspan="8"><div class="empty-state">Geen bestellingen gevonden</div></td></tr>';
+function filterOrders(term) {
+  if (!_lastOrdersRender) return;
+  const { orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod } = _lastOrdersRender;
+  renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod, term);
+}
+
+function renderOrders(orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod, searchTerm = '') {
+  _lastOrdersRender = { orders, getPrice, getStatus, getItems, getCreatedAt, getOrderNr, getCustomer, getMethod };
+  const tbody = document.getElementById('orderTable');
+
+  const term = searchTerm.trim().toLowerCase();
+  const matches = (o) => {
+    if (!term) return true;
+    const customer = getCustomer(o);
+    const name = customer ? `${customer.firstName} ${customer.lastName}` : '';
+    const showName = getItems(o)[0]?.product?.name || '';
+    const orderNr = getOrderNr(o) || '';
+    return name.toLowerCase().includes(term) || showName.toLowerCase().includes(term) || orderNr.includes(term);
+  };
+  const filtered = orders.filter(matches);
+  document.getElementById('orderCount').textContent = term
+    ? `${filtered.length} van ${orders.length} bestellingen`
+    : `${orders.length} bestellingen`;
+
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">${term ? 'Geen bestellingen gevonden voor "' + escHtml(searchTerm) + '"' : 'Geen bestellingen gevonden'}</div></td></tr>`;
+    const existingBtn = document.getElementById('showMoreBtn');
+    if (existingBtn) existingBtn.remove();
     return;
   }
 
-  const sorted = [...orders].sort((a, b) => getCreatedAt(b) - getCreatedAt(a));
+  const sorted = [...filtered].sort((a, b) => getCreatedAt(b) - getCreatedAt(a));
   const pillClass = { Succeeded: 'pill-succeeded', Created: 'pill-created', Failed: 'pill-failed', Pending: 'pill-pending', Prepared: 'pill-succeeded' };
   const pillLabel = { Succeeded: 'Betaald', Created: 'Openstaand', Failed: 'Mislukt', Pending: 'Bezig', Prepared: 'Gratis' };
 
@@ -1053,7 +1092,7 @@ function hideLoginOverlay() {
   const name = isAdmin() ? 'Beheerder' : getSessionName();
   const el = document.getElementById('welcomeName');
   if (el && name) { el.textContent = 'Welkom, ' + name; el.style.display = ''; }
-  loadData();
+  reloadCurrentPage();
   fetchStamhoofdStatus();
 }
 
@@ -1295,6 +1334,195 @@ async function checkAdminPw() {
   document.getElementById('adminPwInput').select();
 }
 
+// ─── STATISTIEKEN (statistieken.html) ──────────────────────
+// Non-production webshops (BBQ, annual meeting, bike tour) never belong
+// here — matched by name so new ones are excluded automatically too,
+// without needing the admin to hide each one by hand.
+const EXCLUDED_STATS_NAME = /jaarvergadering|barbecue|\bbbq\b|fietstocht/i;
+
+// The date a production's run started — used to sort/chart chronologically
+// across both current and archived shows alike (unlike sortDate(), which
+// is specifically about "what's next" for the main dashboard's tabs).
+function openingDate(webshop) {
+  const starts = (webshop?.products || [])
+    .flatMap(p => (p.dateRange ? [p.dateRange.startDate] : []))
+    .filter(d => typeof d === 'number');
+  return starts.length ? Math.min(...starts) : null;
+}
+
+function computeStatsRow(webshop, orders) {
+  const getPayment = o => o.balanceItems?.[0]?.payments?.[0]?.payment ?? null;
+  const getPrice = o => (o.balanceItems ?? []).reduce((s, b) => s + (b.unitPrice ?? 0), 0);
+  const getStatus = o => getPayment(o)?.status ?? 'Unknown';
+  const getItems = o => o.data?.cart?.items ?? [];
+  const CANCELLED_STATUSES = ['Failed', 'Canceled', 'Refunded', 'Disputed', 'Deleted'];
+
+  const uniqueOrders = orders.filter(o => {
+    const s = getStatus(o);
+    return s !== 'Deleted' && s !== 'Canceled';
+  });
+  const activeOrders = uniqueOrders.filter(o => !CANCELLED_STATUSES.includes(getStatus(o)));
+  let tickets = 0;
+  activeOrders.forEach(o => getItems(o).forEach(i => { tickets += (i.amount || 0); }));
+  const revenue = uniqueOrders.reduce((s, o) => s + getPrice(o), 0);
+  const orderCount = uniqueOrders.length;
+
+  return {
+    id: webshop.id,
+    name: webshop.meta?.name || 'Productie',
+    date: openingDate(webshop),
+    tickets,
+    revenue,
+    orderCount,
+    avgOrder: orderCount ? revenue / orderCount : 0,
+  };
+}
+
+let _statsRows = [];
+
+async function loadStats() {
+  setStatus('⏳ Producties zoeken...', 'loading');
+  try {
+    const all = await fetchAllWebshops();
+    const hidden = new Set(CONFIG.hiddenWebshopIds || []);
+    const productions = all.filter(ws => {
+      if (hidden.has(ws.id)) return false;
+      return !EXCLUDED_STATS_NAME.test(ws.meta?.name || '');
+    });
+    if (productions.length === 0) throw new Error('Geen producties gevonden');
+
+    setStatus('⏳ Data ophalen van Stamhoofd...', 'loading');
+    const rows = await mapWithConcurrency(productions, 3, async (ws) => {
+      const [orders, webshop] = await Promise.all([fetchAllOrders(ws.id), fetchWebshop(ws.id)]);
+      return computeStatsRow(webshop, orders);
+    });
+    rows.sort((a, b) => (a.date ?? Infinity) - (b.date ?? Infinity));
+
+    _statsRows = rows;
+    renderStatsTable(rows);
+    renderStatsCharts(rows);
+
+    const totalTickets = rows.reduce((s, r) => s + r.tickets, 0);
+    setStatus('✓ Laatste update: ' + new Date().toLocaleTimeString('nl-BE') + ' — ' + rows.length + ' producties, ' + totalTickets + ' tickets totaal', 'success');
+  } catch (err) {
+    console.error('loadStats error:', err);
+    setStatus('✗ Fout: ' + err.message, 'error');
+    const tbody = document.getElementById('statsTable');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Kon geen data laden.</div></td></tr>';
+  }
+}
+
+function filterStats(term) {
+  renderStatsTable(_statsRows, term);
+}
+
+function renderStatsTable(rows, searchTerm = '') {
+  const tbody = document.getElementById('statsTable');
+  if (!tbody) return;
+  const term = searchTerm.trim().toLowerCase();
+  const filtered = term ? rows.filter(r => r.name.toLowerCase().includes(term)) : rows;
+
+  document.getElementById('statsCount').textContent = term
+    ? `${filtered.length} van ${rows.length} producties`
+    : `${rows.length} producties`;
+
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state">${term ? 'Geen producties gevonden voor "' + escHtml(searchTerm) + '"' : 'Geen producties gevonden'}</div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(r => `
+    <tr>
+      <td>${escHtml(r.name)}</td>
+      <td style="color:var(--muted)">${r.date ? fmtDate(r.date) : '—'}</td>
+      <td>${r.tickets}</td>
+      <td>${fmt(r.revenue)}</td>
+      <td>${fmt(r.avgOrder)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderStatsCharts(rows) {
+  document.getElementById('statsChartMeta1').textContent = rows.length + ' producties';
+  document.getElementById('statsChartMeta2').textContent = fmt(rows.reduce((s, r) => s + r.revenue, 0)) + ' totaal';
+  document.getElementById('statsChartMeta3').textContent = rows.length ? fmt(rows.reduce((s, r) => s + r.avgOrder, 0) / rows.length) + ' gemiddeld' : '—';
+
+  const labels = rows.map(r => r.name);
+  renderStatsBarChart('statsChartTickets', labels, rows.map(r => r.tickets), v => Math.round(v).toLocaleString('nl-BE'));
+  renderStatsBarChart('statsChartRevenue', labels, rows.map(r => r.revenue), v => fmt(v));
+  renderStatsBarChart('statsChartAvg', labels, rows.map(r => r.avgOrder), v => fmt(v));
+}
+
+// Generic hand-rolled SVG bar chart — one production per bar, in the order
+// given (already chronological by the time this is called). No charting
+// library, consistent with the rest of this dashboard.
+function renderStatsBarChart(svgId, labels, values, formatValue) {
+  const svg = document.getElementById(svgId);
+  if (!svg) return;
+  svg.innerHTML = '';
+  if (!values.length) return;
+
+  const W = 800, H = 160, PL = 54, PR = 10, PT = 10, PB = 30;
+  const cW = W - PL - PR, cH = H - PT - PB;
+  const maxVal = Math.max(...values, 1);
+  const n = values.length;
+  const barW = Math.max(4, Math.min(48, (cW / n) - 4));
+  const px = (i) => PL + (i + 0.5) * (cW / n);
+
+  let grid = '';
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const val = (maxVal / ticks) * i;
+    const y = PT + cH - (val / maxVal) * cH;
+    grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`;
+    grid += `<text x="${PL - 6}" y="${y + 4}" text-anchor="end" font-family="Outfit,sans-serif" font-size="9" fill="var(--muted)">${formatValue(val)}</text>`;
+  }
+
+  let bars = '';
+  values.forEach((val, i) => {
+    const x = px(i) - barW / 2;
+    const h = Math.max(2, (val / maxVal) * cH);
+    const y = PT + cH - h;
+    bars += `<rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="var(--gold)" opacity="0.85" rx="2"`
+      + ` data-label="${escHtml(labels[i])}" data-value="${escHtml(formatValue(val))}"`
+      + ' style="cursor:pointer;transition:opacity 0.1s"'
+      + ` onmouseenter="showStatsTooltip(event,this)" onmouseleave="hideStatsTooltip()"></rect>`;
+    if (n <= 12 || i % Math.ceil(n / 12) === 0) {
+      bars += `<text x="${px(i)}" y="${PT + cH + 16}" text-anchor="middle" font-family="Outfit,sans-serif" font-size="8" fill="var(--muted)">${escHtml(shortLabel(labels[i]))}</text>`;
+    }
+  });
+
+  svg.innerHTML = grid + bars;
+}
+
+function shortLabel(name) {
+  return name.length > 12 ? name.slice(0, 11) + '…' : name;
+}
+
+function showStatsTooltip(event, rect) {
+  const tooltip = document.getElementById('statsChartTooltip');
+  if (!tooltip) return;
+  const label = rect.getAttribute('data-label');
+  const value = rect.getAttribute('data-value');
+  tooltip.innerHTML = '<strong>' + label + '</strong><br><span style="color:var(--gold)">' + value + '</span>';
+  tooltip.style.display = 'block';
+  const container = rect.closest('.main-grid');
+  const containerRect = container.getBoundingClientRect();
+  const barRect = rect.getBoundingClientRect();
+  const left = barRect.left - containerRect.left + barRect.width / 2;
+  const top = barRect.top - containerRect.top - 10;
+  tooltip.style.left = Math.min(left, containerRect.width - 160) + 'px';
+  tooltip.style.top = (top - tooltip.offsetHeight - 4) + 'px';
+  rect.setAttribute('opacity', '1');
+}
+
+function hideStatsTooltip() {
+  const tooltip = document.getElementById('statsChartTooltip');
+  if (tooltip) tooltip.style.display = 'none';
+  document.querySelectorAll('#statsChartTickets rect, #statsChartRevenue rect, #statsChartAvg rect')
+    .forEach(r => r.setAttribute('opacity', '0.85'));
+}
+
 // ─── STAMHOOFD STATUS ─────────────────────────────────────
 async function fetchStamhoofdStatus() {
   const dot = document.getElementById('statusDot');
@@ -1351,11 +1579,11 @@ document.addEventListener('DOMContentLoaded', async function() {
   await checkSession();
 
   // Auto-refresh every 5 minutes
-  setInterval(function() { if (getSession()) { loadData(); fetchStamhoofdStatus(); } }, 5 * 60 * 1000);
+  setInterval(function() { if (getSession()) { reloadCurrentPage(); fetchStamhoofdStatus(); } }, 5 * 60 * 1000);
 
  // Fetch latest GitHub commit date
 try {
-  const res = await fetch('https://api.github.com/repos/dennisgeleyn/kvk-dashboard/commits?per_page=1');
+  const res = await fetch('https://api.github.com/repos/webmaster-KVK/kvk-dashboard/commits?per_page=1');
   const data = await res.json();
   const linkHeader = res.headers.get('Link');
   const totalCommits = linkHeader
