@@ -38,7 +38,17 @@ async function loadRemoteConfig() {
 // this is what makes new productions appear automatically, with no admin
 // step required. Paginated the same way as orders (sort + limit + the
 // `next` cursor the API hands back).
+// Short-lived cache so a settings-panel open during a page load (or the
+// 5-minute auto-refresh overlapping a manual refresh) doesn't fire the
+// same /webshops listing twice at once.
+let _webshopsCache = null;
+let _webshopsCacheAt = 0;
+const WEBSHOPS_CACHE_MS = 15000;
+
 async function fetchAllWebshops() {
+  if (_webshopsCache && Date.now() - _webshopsCacheAt < WEBSHOPS_CACHE_MS) {
+    return _webshopsCache;
+  }
   const seenIds = new Set();
   const all = [];
   let params = { sort: 'createdAt DESC,id ASC', limit: '100' };
@@ -56,6 +66,8 @@ async function fetchAllWebshops() {
     if (!page.next) break;
     params = page.next;
   }
+  _webshopsCache = all;
+  _webshopsCacheAt = Date.now();
   return all;
 }
 
@@ -191,15 +203,40 @@ async function saveConfig() {
 // ─── DATA LOADING ─────────────────────────────────────────
 
 // Fetch ALL orders — deduplicated by order ID
-async function fetchWithTimeout(url, options, ms) {
+async function fetchWithTimeout(url, options, ms, retries = 3) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
+    // Stamhoofd rate-limits bursts (429) — with every webshop now fetched
+    // automatically instead of a hand-picked 1-3, that burst is bigger
+    // than before, so this backs off and retries instead of just failing.
+    if (res.status === 429 && retries > 0) {
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * (4 - retries);
+      await new Promise(r => setTimeout(r, waitMs));
+      return fetchWithTimeout(url, options, ms, retries - 1);
+    }
     return res;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Runs async tasks with at most `limit` running at once, instead of firing
+// everything in parallel — keeps bursts to the Stamhoofd API small even
+// when there are many webshops.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function fetchAllOrders(webshopId) {
@@ -267,7 +304,7 @@ async function fetchAllOrders(webshopId) {
 }
 
 async function fetchWebshop(webshopId) {
-  const res = await fetch(proxied(`${apiBase()}/webshop/${webshopId}`), { headers: headers() });
+  const res = await fetchWithTimeout(proxied(`${apiBase()}/webshop/${webshopId}`), { headers: headers() }, 15000);
   if (!res.ok) throw new Error(`Webshop API ${res.status}: ${res.statusText}`);
   return res.json();
 }
@@ -306,12 +343,13 @@ async function loadData() {
     if (webshops.length === 0) throw new Error('Geen webshops gevonden');
 
     setStatus('⏳ Data ophalen van Stamhoofd...', 'loading');
-    const results = await Promise.all(
-      webshops.map(ws => Promise.all([
-        fetchAllOrders(ws.id),
-        fetchWebshop(ws.id),
-      ]).then(([orders, webshop]) => ({ orders, webshop })))
-    );
+    // At most 3 webshops at once — matches what the original hand-picked
+    // config used to top out at, and keeps clear of Stamhoofd's rate limit
+    // now that every webshop is included automatically instead of a few.
+    const results = await mapWithConcurrency(webshops, 3, async (ws) => {
+      const [orders, webshop] = await Promise.all([fetchAllOrders(ws.id), fetchWebshop(ws.id)]);
+      return { orders, webshop };
+    });
 
     _allWebshopData = results;
     if (_activeTabIndex >= results.length) _activeTabIndex = 0;
